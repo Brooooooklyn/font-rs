@@ -13,9 +13,10 @@
 // limitations under the License.
 
 //! A very high performance font renderer.
+extern crate lyon;
 
 #[macro_use]
 pub mod macros;
 pub mod geom;
-pub mod raster;
 pub mod font;
+mod glyphbitmap;

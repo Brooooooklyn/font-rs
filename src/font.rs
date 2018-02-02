@@ -21,9 +21,12 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fmt::{Formatter, Display};
 use std::result::Result;
+use lyon::math::{Point, point};
+use lyon::path::default::{Builder};
+use lyon::path::builder::*;
 
-use geom::{Point, Affine, affine_pt};
-use raster::Raster;
+use geom::{Affine, affine_pt};
+use glyphbitmap::{GlyphBitmap};
 
 #[derive(PartialEq, Eq, Hash)]
 struct Tag(u32);
@@ -388,7 +391,7 @@ impl Metrics {
 }
 
 impl<'a> Font<'a> {
-    fn metrics_and_affine(&self, xmin: i16, ymin: i16, xmax: i16, ymax: i16, size:u32) ->
+    fn metrics_and_affine(&self, xmin: i16, ymin: i16, xmax: i16, ymax: i16, size: usize) ->
             (Metrics, Affine) {
         let ppem = self.head.units_per_em();
         let scale = (size as f32) / (ppem as f32);
@@ -401,15 +404,12 @@ impl<'a> Font<'a> {
         (metrics, z)
     }
 
-    fn render_glyph_inner(&self, raster: &mut Raster, z: &Affine, glyph: &Glyph) {
+    fn render_glyph_inner(&self, builder: &mut Builder, z: &Affine, glyph: &Glyph) {
         match *glyph {
             Glyph::Simple(ref s) => {
                 let mut p = s.points();
                 for n in s.contour_sizes() {
-                    //println!("n = {}", n);
-                    //let v = path_from_pts(p.by_ref().take(n)).collect::<Vec<_>>();
-                    //println!("size = {}", v.len());
-                    draw_path(raster, z, &mut path_from_pts(p.by_ref().take(n)));
+                    draw_path(builder, z, &mut path_from_pts(p.by_ref().take(n)));
                 }
             }
             Glyph::Compound(ref c) => {
@@ -417,7 +417,7 @@ impl<'a> Font<'a> {
                     //println!("component {} {:?}", glyph_index, affine);
                     let concat = Affine::concat(z, &affine);
                     if let Some(component_glyph) = self.get_glyph(glyph_index) {
-                        self.render_glyph_inner(raster, &concat, &component_glyph);
+                        self.render_glyph_inner(builder, &concat, &component_glyph);
                     }
                 }
             }
@@ -427,36 +427,27 @@ impl<'a> Font<'a> {
         }
     }
 
-    pub fn render_glyph(&self, glyph_id: u16, size: u32) -> Option<GlyphBitmap> {
+    pub fn render_glyph(&self, glyph_id: u16, size: usize) -> Option<GlyphBitmap> {
         let glyph = self.get_glyph(glyph_id);
+        let mut builder = Builder::with_capacity(size);
         match glyph {
             Some(Glyph::Simple(ref s)) => {
                 let (xmin, ymin, xmax, ymax) = s.bbox();
                 let (metrics, z) = self.metrics_and_affine(xmin, ymin, xmax, ymax, size);
-                let mut raster = Raster::new(metrics.width(), metrics.height());
-                //dump_glyph(SimpleGlyph(s));
-                self.render_glyph_inner(&mut raster, &z, glyph.as_ref().unwrap());
+                self.render_glyph_inner(&mut builder, &z, glyph.as_ref().unwrap());
+                builder.close();
+                let path = builder.build();
+
                 //None
-                Some(GlyphBitmap {
-                    width: metrics.width(),
-                    height: metrics.height(),
-                    left: metrics.l,
-                    top: metrics.t,
-                    data: raster.get_bitmap()
-                })
+                Some(GlyphBitmap::new(metrics.width(), metrics.height(), metrics.l, metrics.t, path))
             },
             Some(Glyph::Compound(ref c)) => {
                 let (xmin, ymin, xmax, ymax) = c.bbox();
                 let (metrics, z) = self.metrics_and_affine(xmin, ymin, xmax, ymax, size);
-                let mut raster = Raster::new(metrics.width(), metrics.height());
-                self.render_glyph_inner(&mut raster, &z, glyph.as_ref().unwrap());
-                Some(GlyphBitmap {
-                    width: metrics.width(),
-                    height: metrics.height(),
-                    left: metrics.l,
-                    top: metrics.t,
-                    data: raster.get_bitmap()
-                })
+                self.render_glyph_inner(&mut builder, &z, glyph.as_ref().unwrap());
+                builder.close();
+                let path = builder.build();
+                Some(GlyphBitmap::new(metrics.width(), metrics.height(), metrics.l, metrics.t, path))
             }
             _ => {
                 println!("glyph {} error", glyph_id);
@@ -536,7 +527,7 @@ impl<I> Iterator for BezPathOps<I> where I: Iterator<Item=(bool, i16, i16)> {
                         },
                         (Some(first_offcurve), Some(last_offcurve)) => {
                             self.last_offcurve = None;
-                            return Some(QuadTo(last_offcurve, Point::lerp(0.5, &last_offcurve, &first_offcurve)))
+                            return Some(QuadTo(last_offcurve, Point::lerp(&last_offcurve, first_offcurve, 0.5)))
                         }
                     }
                 }
@@ -546,7 +537,7 @@ impl<I> Iterator for BezPathOps<I> where I: Iterator<Item=(bool, i16, i16)> {
                         self.closing = true;
                     },
                     Some((oncurve, x, y)) => {
-                        let p = Point::new(x, y);
+                        let p = point(x as f32, y as f32);
                         if self.first_oncurve.is_none() {
                             if oncurve {
                                 self.first_oncurve = Some(p);
@@ -555,7 +546,7 @@ impl<I> Iterator for BezPathOps<I> where I: Iterator<Item=(bool, i16, i16)> {
                                 match self.first_offcurve {
                                     None => self.first_offcurve = Some(p),
                                     Some(first_offcurve) => {
-                                        let midp = Point::lerp(0.5, &first_offcurve, &p);
+                                        let midp = Point::lerp(&first_offcurve, p, 0.5);
                                         self.first_oncurve = Some(midp);
                                         self.last_offcurve = Some(p);
                                         return Some(MoveTo(midp));
@@ -568,7 +559,7 @@ impl<I> Iterator for BezPathOps<I> where I: Iterator<Item=(bool, i16, i16)> {
                                 (None, true) => return Some(LineTo(p)),
                                 (Some(last_offcurve), false) => {
                                     self.last_offcurve = Some(p);
-                                    return Some(QuadTo(last_offcurve, Point::lerp(0.5, &last_offcurve, &p)));
+                                    return Some(QuadTo(last_offcurve, Point::lerp(&last_offcurve, p, 0.5)));
                                 },
                                 (Some(last_offcurve), true) => {
                                     self.last_offcurve = None;
@@ -619,77 +610,26 @@ pub fn parse(data: &[u8]) -> Result<Font, FontError> {
         loca: loca,
         glyf: glyf,
     };
-    //println!("version = {:x}", version);
     Ok(f)
 }
 
-/*
-fn dump_glyph(g: Glyph) {
-    match g {
-        Glyph::Empty => println!("empty"),
-        Glyph::Simple(s) => {
-            //println!("{} contours", s.number_of_contours())
-            let mut p = s.points();
-            for n in s.contour_sizes() {
-                for _ in 0..n {
-                    println!("{:?}", p.next().unwrap());
-                }
-                println!("z");
-            }
-            let mut p = s.points();
-            for n in s.contour_sizes() {
-                for pathop in path_from_pts(p.by_ref().take(n)) {
-                    println!("{:?}", pathop);
-                }
-            }
-        },
-        _ => println!("other")
-    }
-}
-*/
-
-/*
-fn dump(data: Vec<u8>) {
-    println!("length is {}", data.len());
-    match parse(&data) {
-        Ok(font) => {
-            println!("numGlyphs = {}", font.maxp.num_glyphs());
-            for i in 0.. font.maxp.num_glyphs() {
-                println!("glyph {}", i);
-                match font.get_glyph(i) {
-                    Some(g) => dump_glyph(g),
-                    None => println!("glyph {} error", i)
-                }
-            }
-        },
-        _ => ()
-    }
-}
-*/
-
-fn draw_path<I: Iterator<Item=PathOp>>(r: &mut Raster, z: &Affine, path: &mut I) {
-    let mut lastp = Point::new(0i16, 0i16);
+fn draw_path<I: Iterator<Item=PathOp>>(builder: &mut Builder, z: &Affine, path: &mut I) {
+    let mut lastp = Point::new(0f32, 0f32);
     for op in path {
         match op {
             MoveTo(p) => lastp = p,
             LineTo(p) => {
-                r.draw_line(&affine_pt(z, &lastp), &affine_pt(z, &p));
+                builder.move_to(affine_pt(z, &lastp));
+                builder.line_to(affine_pt(z, &p));
                 lastp = p
             },
             QuadTo(p1, p2) => {
-                r.draw_quad(&affine_pt(z, &lastp), &affine_pt(z, &p1), &affine_pt(z, &p2));
+                builder.move_to(affine_pt(z, &lastp));
+                builder.quadratic_bezier_to(affine_pt(z, &p1), affine_pt(z, &p2));
                 lastp = p2;
             }
         }
     }
-}
-
-pub struct GlyphBitmap {
-    pub width: usize,
-    pub height: usize,
-    pub left: i32,
-    pub top: i32,
-    pub data: Vec<u8>,
 }
 
 /*
